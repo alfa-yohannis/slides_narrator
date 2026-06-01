@@ -7,26 +7,39 @@ The tool runs a six‑stage pipeline that goes from a static PDF to a finished
 `.mp4` plus a matching `.srt`:
 
 ```
-PDF ─▶ PNG pages ─▶ narration scripts (Claude) ─▶ MP3 + SRT (Edge TTS)
+PDF ─▶ PNG pages ─▶ narration scripts (Claude | Codex) ─▶ MP3 + SRT (Edge | Gemini TTS)
         ─▶ per‑slide MP4 clips (ffmpeg) ─▶ concatenated MP4 + merged SRT
 ```
 
-Each slide gets its own narration script (written in Bahasa Indonesia by the
-`claude` CLI from the actual slide content), its own spoken audio track, and its
-own subtitle file. Every clip lasts exactly as long as its narration, then all
-clips and subtitles are stitched into one video.
+Each slide gets its own narration script (written in Bahasa Indonesia from the
+actual slide content), its own spoken audio track, and its own subtitle file.
+Every clip lasts exactly as long as its narration, then all clips and subtitles
+are stitched into one video.
+
+The narrator and the TTS engine are each swappable:
+
+- **Narrator** — `--narrator claude` (default, reads the PDF directly) or
+  `--narrator codex` (feeds extracted slide text to `codex exec`).
+- **TTS** — `--tts-provider edge` (default, free, no key, exact subtitle
+  timing) or `--tts-provider gemini` (nicer voices, needs an API key,
+  estimated subtitle timing).
 
 ---
 
 ## Features
 
 - **One command, end to end.** PDF in, narrated video out.
-- **Auto‑generated narration** from your slides via Claude Code — no API key
-  required, it reuses your existing `claude` CLI session.
-- **Free, high‑quality TTS** through Microsoft Edge TTS (`id-ID-ArdiNeural` by
-  default; `id-ID-GadisNeural` for a female voice).
+- **Auto‑generated narration** from your slides via Claude Code (default, no API
+  key — reuses your existing `claude` session) or the Codex CLI
+  (`--narrator codex`).
+- **In‑depth narration.** Content slides are explained in depth — concrete
+  examples/instances, the reasoning behind each concept, analogies, trade‑offs,
+  and a concrete walk‑through for code — not just a re‑read of the bullets.
+- **Two TTS engines.** Free Microsoft Edge TTS (`id-ID-ArdiNeural` default;
+  `id-ID-GadisNeural` for female) with exact subtitle timing, or Google Gemini
+  TTS (`--tts-provider gemini`, default voice `Iapetus`) for nicer voices.
 - **Synchronized subtitles** (`.srt`) generated alongside the audio and merged
-  with correct global timestamps.
+  with correct global timestamps (exact with Edge, estimated with Gemini).
 - **Resumable.** Every stage skips work that already exists, so an interrupted
   run picks up where it left off. Re‑run anytime.
 - **Robust TTS** with configurable retries and back‑off for flaky networks.
@@ -46,7 +59,9 @@ clips and subtitles are stitched into one video.
 |------|----------|--------------------------|
 | `ffmpeg`, `ffprobe` | video/audio encoding & probing | `sudo apt install ffmpeg` |
 | `pdftoppm`, `pdfinfo` | PDF → PNG, page count (poppler) | `sudo apt install poppler-utils` |
-| `claude` | narration script generation | [Claude Code](https://claude.com/claude-code) |
+| `pdftotext` | slide text extraction — **only for `--narrator codex`** | `sudo apt install poppler-utils` |
+| `claude` | narration (default narrator) | [Claude Code](https://claude.com/claude-code) |
+| `codex` | narration — **only for `--narrator codex`** | `npm install -g @openai/codex` |
 
 **Python:** 3.9+ (the script uses `from __future__ import annotations`, so older
 3.x may also work, but 3.9+ is recommended).
@@ -100,14 +115,17 @@ videos/pertemuan_14/pertemuan_14.srt
 | # | Stage | Tool | Output |
 |---|-------|------|--------|
 | 1 | `pdf` | `pdftoppm` | `slides/slide_NN.png` (one per page) |
-| 2 | `scripts` | `claude` CLI | `scripts/slide_NN.txt` (Indonesian narration) |
-| 3 | `audio` | Edge TTS | `audio/slide_NN.mp3` |
-| 5 | `audio` | Edge TTS | `subtitles/clip_NN.srt` (emitted with the MP3) |
+| 2 | `scripts` | `claude` CLI (or `codex`) | `scripts/slide_NN.txt` (Indonesian narration) |
+| 3 | `audio` | Edge TTS (or Gemini) | `audio/slide_NN.mp3` |
+| 5 | `audio` | Edge TTS (or Gemini) | `subtitles/clip_NN.srt` |
 | 4 | `clips` | `ffmpeg` | `clips/clip_NN.mp4` (still image + audio) |
 | 6 | `merge` | `ffmpeg` | `<final-name>.mp4` + `<final-name>.srt` |
 
-> Stages 3 and 5 happen together — Edge TTS emits the MP3 and its SRT in a
-> single call. The numbering follows the conceptual pipeline order.
+> Stages 3 and 5 happen together. With **Edge TTS** the MP3 and its SRT come
+> from a single call, so subtitle timing is exact. With **Gemini TTS** only
+> audio is returned, so the SRT is estimated by spreading each script's
+> sentences across the clip by length. The numbering follows the conceptual
+> pipeline order.
 
 ### Output directory layout
 
@@ -189,7 +207,35 @@ python3 video_builder_claude/build.py \
   --audio-bitrate 128k
 ```
 
-### 4. Re‑run only specific stages
+### 4. Codex narrator instead of Claude
+
+Requires the `codex` CLI and `pdftotext`:
+
+```bash
+python3 video_builder_claude/build.py \
+  --pdf slides/pertemuan_14/pertemuan_14.pdf \
+  --target videos/pertemuan_14 \
+  --narrator codex \
+  --codex-model gpt-5.5 \
+  --codex-reasoning-effort xhigh
+```
+
+### 5. Gemini TTS (voice Iapetus)
+
+Reads `GEMINI_API_KEY` from the environment or the repo‑root `.env`. On the
+free tier, keep concurrency low and the retry wait generous:
+
+```bash
+python3 video_builder_claude/build.py \
+  --pdf slides/pertemuan_14/pertemuan_14.pdf \
+  --target videos/pertemuan_14 \
+  --tts-provider gemini \
+  --gemini-voice Iapetus \
+  --concurrency 1 \
+  --tts-retry-wait 30
+```
+
+### 6. Re‑run only specific stages
 
 Re‑encode the clips and re‑merge after tweaking quality settings, without
 regenerating scripts or audio:
@@ -211,7 +257,7 @@ python3 video_builder_claude/build.py \
   --only scripts --force
 ```
 
-### 5. Force a complete rebuild from scratch
+### 7. Force a complete rebuild from scratch
 
 ```bash
 python3 video_builder_claude/build.py \
@@ -219,6 +265,108 @@ python3 video_builder_claude/build.py \
   --target videos/pertemuan_14 \
   --force
 ```
+
+---
+
+## Recipes — narrator × TTS combinations
+
+The narrator (`--narrator`) and the TTS engine (`--tts-provider`) are
+independent, so you can mix and match. The four combinations:
+
+| Narrator | TTS | Command flags | Needs |
+|----------|-----|---------------|-------|
+| Claude (default) | Edge (default) | *(none — this is the default)* | `claude` |
+| Claude | Gemini | `--tts-provider gemini` | `claude`, `GEMINI_API_KEY` |
+| Codex | Edge | `--narrator codex` | `codex`, `pdftotext` |
+| Codex | Gemini | `--narrator codex --tts-provider gemini` | `codex`, `pdftotext`, `GEMINI_API_KEY` |
+
+### A. Default — Claude narrator + Edge TTS (free, no key)
+
+```bash
+python3 video_builder_claude/build.py \
+  --pdf slides/session02/session02.pdf \
+  --target videos/session02
+```
+
+### B. Claude narrator + Gemini TTS (nicer voice)
+
+```bash
+python3 video_builder_claude/build.py \
+  --pdf slides/session02/session02.pdf \
+  --target videos/session02 \
+  --tts-provider gemini --gemini-voice Iapetus \
+  --concurrency 1 --tts-retry-wait 30
+```
+
+### C. Codex narrator + Edge TTS
+
+```bash
+python3 video_builder_claude/build.py \
+  --pdf slides/session02/session02.pdf \
+  --target videos/session02 \
+  --narrator codex --codex-model gpt-5.5
+```
+
+### D. Codex narrator + Gemini TTS (everything swapped)
+
+```bash
+python3 video_builder_claude/build.py \
+  --pdf slides/session02/session02.pdf \
+  --target videos/session02 \
+  --narrator codex --codex-model gpt-5.5 \
+  --tts-provider gemini --gemini-voice Charon \
+  --concurrency 1 --tts-retry-wait 30
+```
+
+### E. Generate scripts first, review them, then build the rest
+
+Useful when you want to read/edit the narration before spending time on TTS
+and encoding:
+
+```bash
+# 1) scripts only (Codex here; drop --narrator for Claude)
+python3 video_builder_claude/build.py \
+  --pdf slides/session02/session02.pdf \
+  --target videos/session02 \
+  --narrator codex --only scripts
+
+# 2) (optional) edit videos/session02/scripts/slide_*.txt by hand
+
+# 3) audio + clips + merge, reusing your edited scripts
+python3 video_builder_claude/build.py \
+  --pdf slides/session02/session02.pdf \
+  --target videos/session02 \
+  --skip-scripts --tts-provider gemini
+```
+
+### F. Switch TTS engine on an existing build (re‑voice only)
+
+Re‑generate just the audio/subtitles with a different engine or voice, then
+re‑encode clips and re‑merge — without touching the scripts:
+
+```bash
+python3 video_builder_claude/build.py \
+  --pdf slides/session02/session02.pdf \
+  --target videos/session02 \
+  --skip-scripts \
+  --tts-provider gemini --gemini-voice Orus \
+  --only audio,clips,merge --force
+```
+
+### G. Hand‑written scripts + Gemini female‑style voice, 4K
+
+```bash
+python3 video_builder_claude/build.py \
+  --pdf slides/session02/session02.pdf \
+  --target videos/session02 \
+  --skip-scripts \
+  --tts-provider gemini --gemini-voice Iapetus \
+  --width 3840 --height 2160 --concurrency 1
+```
+
+> **Tip:** on the Gemini **free tier**, always add `--concurrency 1` and a
+> larger `--tts-retry-wait` (e.g. `30`) to ride out the per‑minute rate limit
+> (HTTP 429). Enabling billing on the API project removes the limit.
 
 ---
 
@@ -237,24 +385,67 @@ python3 video_builder_claude/build.py \
 |------|---------|-------------|
 | `--final-name STEM` | PDF file stem | Base name for the final `.mp4` / `.srt`. |
 
-### Narration (Claude)
+### Narration
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--narrator` | `claude` | Narration generator: `claude` or `codex`. |
+| `--skip-scripts` | off | Use existing `scripts/*.txt`; do not call any narrator. |
+
+**Claude narrator** (default) — reads the PDF directly via its `Read` tool:
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--claude-cmd` | `claude` | Claude CLI executable used for script generation. |
 | `--claude-model` | `opus` | Model alias/ID passed to `claude --model`. |
 | `--claude-effort` | `high` | Effort level (`low`/`medium`/`high`/`xhigh`/`max`, or `""` to omit). |
-| `--skip-scripts` | off | Use existing `scripts/*.txt`; do not call `claude`. |
 
-### Text‑to‑speech (Edge TTS)
+**Codex narrator** (`--narrator codex`) — feeds `pdftotext`‑extracted slide
+text to `codex exec` with a JSON output schema. Requires the `codex` CLI and
+`pdftotext` (poppler‑utils):
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--codex-cmd` | `codex` | Codex CLI executable. |
+| `--codex-model` | `gpt-5.5` | Model passed to `codex exec --model`. |
+| `--codex-reasoning-effort` | `xhigh` | `model_reasoning_effort` for codex. |
+| `--codex-retries` | `2` | Max retries on transient codex failure. |
+| `--codex-retry-wait` | `30` | Seconds between codex retries. |
+| `--codex-timeout` | `1800` | Seconds before one codex attempt is considered stuck. |
+
+### Text‑to‑speech
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tts-provider` | `edge` | TTS engine: `edge` or `gemini`. |
+| `--skip-existing-audio` | off | Keep existing MP3s even when their SRT is missing. |
+| `--tts-retries` | `3` | Max retries per slide on TTS failure. |
+| `--tts-retry-wait` | `10.0` | Seconds to wait between TTS retries. |
+| `--tts-timeout` | `180` | Per‑request timeout (Gemini only). |
+
+**Edge TTS** (`--tts-provider edge`, default) — free, no key. Emits the MP3 and
+**exact** word/sentence subtitle timing together:
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--voice` | `id-ID-ArdiNeural` | Edge TTS voice. Try `id-ID-GadisNeural` for female. |
 | `--rate` | `-5%` | Speech rate adjustment (e.g. `-5%`, `+0%`, `+10%`). |
-| `--skip-existing-audio` | off | Keep existing MP3s even when their SRT is missing. |
-| `--tts-retries` | `3` | Max retries per slide on TTS failure. |
-| `--tts-retry-wait` | `10.0` | Seconds to wait between TTS retries. |
+
+**Gemini TTS** (`--tts-provider gemini`) — nicer voices, needs an API key.
+Returns audio only, so subtitle timings are **estimated** (sentences spread
+across the clip by length):
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--gemini-voice` | `Iapetus` | Gemini prebuilt voice. Also: `Charon`, `Orus`, `Rasalgethi`, `Algieba`, … |
+| `--gemini-tts-model` | `gemini-2.5-flash-preview-tts` | Gemini TTS model. |
+| `--gemini-api-key` | — | API key. Falls back to `$GEMINI_API_KEY`, then a `.env` at the repo root. |
+
+> **Free‑tier note:** the Gemini API free tier rate‑limits the preview TTS
+> model heavily (a few requests per minute, low daily cap → HTTP 429). For a
+> full deck on the free tier, use `--concurrency 1` and a larger
+> `--tts-retry-wait`; enabling billing on the API project removes the limit.
+> The key in `.env` is read automatically (`GEMINI_API_KEY`).
 
 ### Rendering & encoding
 
@@ -306,6 +497,16 @@ The run streams Claude's progress live (session start, assistant text, tool
 calls, results) and prints a heartbeat while waiting. There is a 30‑minute hard
 cap on the script‑generation step.
 
+### Codex narrator (`--narrator codex`)
+
+Codex can't read the PDF binary, so this path extracts each page's text with
+`pdftotext` first, then sends all pages to `codex exec` in one call with a JSON
+**output schema** (`--output-schema`) so the response is one narration string
+per slide. It uses the same in‑depth narration guidance as the Claude prompt.
+Requires the `codex` CLI (`npm install -g @openai/codex`) and `pdftotext`. On a
+transient failure it retries (`--codex-retries`, `--codex-retry-wait`); if Codex
+reports the model needs a newer CLI, upgrade with `npm install -g @openai/codex@latest`.
+
 ---
 
 ## Troubleshooting
@@ -314,11 +515,19 @@ cap on the script‑generation step.
   [Requirements](#requirements)).
 - **`claude CLI not found in PATH`** — install Claude Code, or supply your own
   scripts and pass `--skip-scripts`.
-- **`Expected N scripts, got M`** — Claude returned the wrong number of entries;
-  inspect `scripts/_raw_response.txt`, then re‑run `--only scripts --force`.
+- **`codex CLI not found in PATH`** (with `--narrator codex`) — install/login to
+  Codex (`npm install -g @openai/codex`), or pass `--skip-scripts`.
+- **`Expected N scripts, got M`** — the narrator returned the wrong number of
+  entries; for Claude, inspect `scripts/_raw_response.txt`, then re‑run
+  `--only scripts --force`.
 - **`edge-tts produced 0-byte audio` / TTS retries exhausted** — usually a
   transient network issue. Increase `--tts-retries` / `--tts-retry-wait`, lower
   `--concurrency`, and re‑run (completed slides are skipped).
+- **`gemini HTTP 429` / quota exceeded** (with `--tts-provider gemini`) — the
+  free tier rate‑limits the preview TTS model. Use `--concurrency 1` and a
+  larger `--tts-retry-wait` (e.g. `30`), or enable billing on the API project.
+- **`gemini TTS requires an API key`** — set `GEMINI_API_KEY` (environment or a
+  `.env` at the repo root), or pass `--gemini-api-key`.
 - **A clip looks corrupt** — re‑run with `--only clips --force` to re‑encode.
 - **Wrong number of slides rendered** — delete the `slides/` folder and re‑run
   the `pdf` stage, or use `--force`.
