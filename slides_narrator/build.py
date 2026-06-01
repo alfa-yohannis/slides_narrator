@@ -1087,10 +1087,252 @@ def stage_merge(
 
 
 # ---------------------------------------------------------------------------
+# Stage 7: YouTube publishing metadata (youtube.txt)
+#
+# Asks the selected narrator (claude/codex) to write a title/description/keywords
+# block from the narration transcript, then sanitises and clamps each field to
+# YouTube's limits: title <=100, description <=5000, keywords <=500 chars.
+# ---------------------------------------------------------------------------
+
+YT_TITLE_MAX = 100
+YT_DESC_MAX = 5000
+YT_KEYWORDS_MAX = 500
+
+# Emoji / pictograph blocks to strip from title + description (kept narrow so it
+# does NOT remove ordinary punctuation like em dash, ellipsis or curly quotes).
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"  # symbols, pictographs, emoticons, transport, supplemental
+    "\U0001F1E6-\U0001F1FF"  # regional indicators (flags)
+    "\U00002600-\U000026FF"  # misc symbols
+    "\U00002700-\U000027BF"  # dingbats
+    "\U00002B00-\U00002BFF"  # misc symbols & arrows (stars etc.)
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U00002190-\U000021FF"  # arrows
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _tidy_ws(text: str) -> str:
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r" *\n", "\n", text)
+    return text.strip()
+
+
+def _strip_emoji(text: str) -> str:
+    """Remove emoji/pictographs but keep hashtags and ordinary punctuation."""
+    return _tidy_ws(_EMOJI_RE.sub("", text))
+
+
+def _strip_emoji_hashtags(text: str) -> str:
+    """For the title: strip emoji AND #hashtags (but keep things like 'C#')."""
+    text = _EMOJI_RE.sub("", text)
+    text = re.sub(r"(?<!\S)#\w+", "", text)
+    return _tidy_ws(text)
+
+
+def _cap_hashtags(text: str, max_tags: int = 15) -> str:
+    """YouTube ignores ALL hashtags once a description has more than 15, so drop
+    any beyond the 15th rather than risk losing them all."""
+    count = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal count
+        count += 1
+        return m.group(0) if count <= max_tags else ""
+
+    return _tidy_ws(re.sub(r"(?<!\S)#\w+", repl, text))
+
+
+def _clamp(text: str, limit: int) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    sp = cut.rfind(" ")
+    if sp >= limit - 20:  # snap to a word boundary if one is close to the end
+        cut = cut[:sp]
+    return cut.rstrip()
+
+
+def _clamp_keywords(keywords: str, limit: int = YT_KEYWORDS_MAX) -> str:
+    tags = [t.strip() for t in keywords.replace("\n", ",").split(",") if t.strip()]
+    out: list[str] = []
+    total = 0
+    for tag in tags:
+        add = len(tag) + (2 if out else 0)  # account for ", " joiner
+        if total + add > limit:
+            break
+        out.append(tag)
+        total += add
+    return ", ".join(out)
+
+
+def _extract_json(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            raise
+        return json.loads(m.group(0))
+
+
+def _youtube_prompt(transcript: str) -> str:
+    return textwrap.dedent(
+        """
+        You are writing YouTube publishing metadata for a narrated lecture video.
+        Base it ONLY on the narration transcript below. Write the "title" and
+        "description" in the SAME LANGUAGE as the transcript.
+
+        Return ONE JSON object with exactly these keys: "title", "description",
+        "keywords".
+        - title: at most 100 characters; put the most important, searchable terms
+          in the first ~70 characters; no emoji; NO hashtags.
+        - description: at most 5000 characters; no emoticons. Start with a strong
+          hook in the first ~157 characters, then a short overview and a bulleted
+          list (plain "- " lines) of what the video covers. END with one final
+          line of 5 to 10 relevant hashtags as single words with no spaces
+          (e.g. #EnterpriseArchitecture #ArchiMate). Use at most 15 hashtags, and
+          put hashtags ONLY here in the description, never in the title.
+        - keywords: a comma-separated list of plain tags (NO '#'); total length at
+          most 500 characters; each tag at most 30 characters; mix the
+          transcript's language and English technical terms.
+
+        Output ONLY the JSON object. No code fence, no commentary.
+
+        Transcript:
+        """
+    ).strip() + "\n\n" + transcript
+
+
+def _youtube_schema() -> dict:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string", "maxLength": YT_TITLE_MAX},
+            "description": {"type": "string", "maxLength": YT_DESC_MAX},
+            "keywords": {"type": "string", "maxLength": YT_KEYWORDS_MAX},
+        },
+        "required": ["title", "description", "keywords"],
+    }
+
+
+def _youtube_text(title: str, description: str, keywords: str) -> str:
+    return (
+        f"TITLE\n{title.strip()}\n\n"
+        f"DESCRIPTION\n{description.strip()}\n\n"
+        f"KEYWORDS\n{keywords.strip()}\n"
+    )
+
+
+def _youtube_via_claude(prompt: str, claude_cmd: str, model: str, effort: str) -> dict:
+    cmd = [claude_cmd, "-p"]
+    if model:
+        cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
+    proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(f"claude exited {proc.returncode}: {proc.stderr.strip()[:300]}")
+    return _extract_json(proc.stdout)
+
+
+def _youtube_via_codex(prompt: str, codex_bin: str, model: str, effort: str,
+                       work_dir: Path, timeout: float) -> dict:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    schema_path = work_dir / "youtube_schema.json"
+    out_path = work_dir / "youtube_response.json"
+    schema_path.write_text(json.dumps(_youtube_schema(), indent=2), encoding="utf-8")
+    if out_path.exists():
+        out_path.unlink()
+    subprocess.run(
+        [codex_bin, "exec", "--model", model,
+         "-c", f'model_reasoning_effort="{effort}"',
+         "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral",
+         "--output-schema", str(schema_path),
+         "--output-last-message", str(out_path), "-"],
+        input=prompt, text=True, capture_output=True, check=True, timeout=timeout,
+    )
+    return _load_codex_response(out_path)
+
+
+def stage_generate_youtube(
+    scripts_dir: Path,
+    out_path: Path,
+    work_dir: Path,
+    page_count: int,
+    narrator: str,
+    claude_cmd: str,
+    claude_model: str,
+    claude_effort: str,
+    codex_cmd: str,
+    codex_model: str,
+    codex_effort: str,
+    codex_timeout: float,
+    force: bool,
+) -> None:
+    if out_path.exists() and not force:
+        log(f"[7/7] {out_path.name} already exists — skipping (use --force to regenerate)")
+        return
+
+    width = max(2, len(str(page_count)))
+    parts = []
+    for i in range(1, page_count + 1):
+        p = scripts_dir / f"slide_{i:0{width}d}.txt"
+        if p.exists():
+            t = p.read_text(encoding="utf-8").strip()
+            if t:
+                parts.append(t)
+    if not parts:
+        log("[7/7] no narration scripts found — skipping YouTube metadata")
+        return
+    transcript = "\n\n".join(parts)
+    prompt = _youtube_prompt(transcript)
+
+    # This is a trailing nice-to-have: never fail the whole build over it.
+    try:
+        cmd_name = codex_cmd if narrator == "codex" else claude_cmd
+        if shutil.which(cmd_name) is None:
+            log(f"[7/7] `{cmd_name}` CLI not found — skipping YouTube metadata "
+                f"(run with --skip-youtube to silence, or generate it later).")
+            return
+        log(f"[7/7] Generating YouTube metadata via `{cmd_name}`...")
+        if narrator == "codex":
+            meta = _youtube_via_codex(prompt, shutil.which(codex_cmd), codex_model,
+                                      codex_effort, work_dir, codex_timeout)
+        else:
+            meta = _youtube_via_claude(prompt, claude_cmd, claude_model, claude_effort)
+    except (subprocess.SubprocessError, RuntimeError, json.JSONDecodeError, OSError) as e:
+        log(f"[7/7] YouTube metadata generation failed ({type(e).__name__}: {e}); "
+            f"skipping youtube.txt. The video itself is unaffected.")
+        return
+
+    title = _clamp(_strip_emoji_hashtags(str(meta.get("title", ""))), YT_TITLE_MAX)
+    # Description keeps hashtags (emoji stripped, capped at 15 so YouTube honours them).
+    desc = _clamp(_cap_hashtags(_strip_emoji(str(meta.get("description", "")))), YT_DESC_MAX)
+    keywords = _clamp_keywords(str(meta.get("keywords", "")), YT_KEYWORDS_MAX)
+    if not title or not desc:
+        log("[7/7] narrator returned empty title/description; skipping youtube.txt")
+        return
+
+    out_path.write_text(_youtube_text(title, desc, keywords), encoding="utf-8")
+    log(f"[7/7] Wrote {out_path} "
+        f"(title {len(title)}/{YT_TITLE_MAX}, desc {len(desc)}/{YT_DESC_MAX}, "
+        f"keywords {len(keywords)}/{YT_KEYWORDS_MAX})")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-STAGES = ["pdf", "scripts", "audio", "clips", "merge"]
+STAGES = ["pdf", "scripts", "audio", "clips", "merge", "youtube"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -1166,9 +1408,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--codex-timeout", type=float, default=1800.0,
                    help="Seconds before one codex attempt is considered stuck (default 1800).")
     p.add_argument("--only", default=None,
-                   help=f"Comma-separated stages to run: {','.join(STAGES)}.")
+                   help=f"Comma-separated stages to run: {','.join(STAGES)}. "
+                        "youtube generates youtube.txt from the narration.")
     p.add_argument("--skip-scripts", action="store_true",
                    help="Use existing scripts/*.txt (no API call).")
+    p.add_argument("--skip-youtube", action="store_true",
+                   help="Do not generate youtube.txt (YouTube title/description/keywords).")
     p.add_argument("--force", action="store_true",
                    help="Regenerate outputs even if they already exist.")
     return p.parse_args()
@@ -1212,6 +1457,7 @@ def main() -> None:
     final_stem = args.final_name or pdf.stem
     out_mp4 = target / f"{final_stem}.mp4"
     out_srt = target / f"{final_stem}.srt"
+    out_youtube = target / "youtube.txt"
 
     stages = set(STAGES if args.only is None else
                  [s.strip() for s in args.only.split(",") if s.strip()])
@@ -1263,6 +1509,14 @@ def main() -> None:
 
     if "merge" in stages:
         stage_merge(clips_dir, subs_dir, work_dir, out_mp4, out_srt, page_count)
+
+    if "youtube" in stages and not args.skip_youtube:
+        stage_generate_youtube(
+            scripts_dir, out_youtube, work_dir, page_count,
+            args.narrator, args.claude_cmd, args.claude_model, args.claude_effort,
+            args.codex_cmd, args.codex_model, args.codex_reasoning_effort,
+            args.codex_timeout, args.force,
+        )
 
 
 if __name__ == "__main__":

@@ -3,12 +3,14 @@
 Turn a PDF slide deck into a fully narrated lecture video — with Indonesian
 voice‑over and synchronized subtitles — in a single command.
 
-The tool runs a six‑stage pipeline that goes from a static PDF to a finished
-`.mp4` plus a matching `.srt`:
+It runs a seven‑stage pipeline that goes from a static PDF to three finished
+artifacts — the video (`.mp4`), the subtitles (`.srt`), and ready‑to‑paste
+YouTube metadata (`youtube.txt`):
 
 ```
 PDF ─▶ PNG pages ─▶ narration scripts (Claude | Codex) ─▶ MP3 + SRT (Edge | Gemini TTS)
         ─▶ per‑slide MP4 clips (ffmpeg) ─▶ concatenated MP4 + merged SRT
+        ─▶ youtube.txt (title / description / keywords)
 ```
 
 Each slide gets its own narration script (written in Bahasa Indonesia from the
@@ -40,6 +42,8 @@ The narrator and the TTS engine are each swappable:
   TTS (`--tts-provider gemini`, default voice `Iapetus`) for nicer voices.
 - **Synchronized subtitles** (`.srt`) generated alongside the audio and merged
   with correct global timestamps (exact with Edge, estimated with Gemini).
+- **YouTube metadata** (`youtube.txt`) auto‑written from the narration — title,
+  description, and keywords, sanitised and clamped to YouTube's length limits.
 - **Resumable.** Every stage skips work that already exists, so an interrupted
   run picks up where it left off. Re‑run anytime.
 - **Robust TTS** with configurable retries and back‑off for flaky networks.
@@ -209,6 +213,7 @@ videos/pertemuan_14/pertemuan_14.srt
 | 5 | `audio` | Edge TTS (or Gemini) | `subtitles/clip_NN.srt` |
 | 4 | `clips` | `ffmpeg` | `clips/clip_NN.mp4` (still image + audio) |
 | 6 | `merge` | `ffmpeg` | `<final-name>.mp4` + `<final-name>.srt` |
+| 7 | `youtube` | `claude` CLI (or `codex`) | `youtube.txt` (title / description / keywords) |
 
 > Stages 3 and 5 happen together. With **Edge TTS** the MP3 and its SRT come
 > from a single call, so subtitle timing is exact. With **Gemini TTS** only
@@ -229,7 +234,8 @@ videos/pertemuan_14/
 ├── clips/             # clip_01.mp4, clip_02.mp4, ...      (per‑slide video)
 ├── work/              # concat.txt (ffmpeg concat list)
 ├── pertemuan_14.mp4   # ← final video
-└── pertemuan_14.srt   # ← final merged subtitles
+├── pertemuan_14.srt   # ← final merged subtitles
+└── youtube.txt        # ← YouTube title / description / keywords
 ```
 
 File numbering is zero‑padded to at least two digits and widened automatically
@@ -552,7 +558,8 @@ across the clip by length):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--only` | (all) | Comma‑separated stages to run: `pdf,scripts,audio,clips,merge`. |
+| `--only` | (all) | Comma‑separated stages to run: `pdf,scripts,audio,clips,merge,youtube`. |
+| `--skip-youtube` | off | Do not generate `youtube.txt`. |
 | `--force` | off | Regenerate outputs even if they already exist. |
 
 Run `python3 slides_narrator/build.py --help` to see all options with the
@@ -674,6 +681,72 @@ Notes:
   `SLIDES_NARRATOR_VENV` marker and `edge_tts` is stubbed if absent), so they
   run under any Python 3.9+ with `pytest` available — the app's `.venv` is the
   simplest place to get that.
+
+---
+
+## Publishing to YouTube (`youtube.txt`)
+
+The final **`youtube`** stage writes a `youtube.txt` next to the `.mp4` / `.srt`,
+holding ready‑to‑paste metadata for YouTube Studio. It is produced automatically
+on a normal run (the same selected `--narrator` — Claude or Codex — writes it
+from the narration transcript, in the narration's language). Three sections under
+plain headers:
+
+```
+TITLE
+<one line>
+
+DESCRIPTION
+<free text — no emoticons; ends with relevant #hashtags>
+
+KEYWORDS
+<comma-separated tags (no #)>
+```
+
+Each field is sanitised and **clamped to YouTube's 2026 limits** before writing,
+so the output is always within bounds:
+
+| Field | Hard limit | What the stage does |
+|-------|-----------|---------------------|
+| Title | **100 characters** | front‑loads key terms in the first ~70; strips emoji and hashtags; clamps to 100 at a word boundary |
+| Description | **5,000 characters** | hook in the first ~157, then an overview + bullet list, ending with relevant `#hashtags`; strips emoji (keeps hashtags), caps at **15 hashtags** (YouTube ignores them all past 15); clamps to 5,000 |
+| Keywords (tags) | **500 characters combined** | plain comma‑separated tags (no `#`); drops trailing tags so the total stays ≤ 500 |
+
+Control it:
+
+```bash
+# default: generated as part of the full run, no extra flags needed
+
+# regenerate only youtube.txt for an existing build (reuses the scripts)
+python3 slides_narrator/build.py --pdf deck.pdf --target out \
+  --skip-scripts --only youtube --force
+
+# turn it off
+python3 slides_narrator/build.py --pdf deck.pdf --target out --skip-youtube
+```
+
+Notes:
+
+- It needs the selected narrator CLI (`claude` by default, or `codex`). If that
+  CLI is missing, the stage **logs a warning and skips** — the video and
+  subtitles are never put at risk by it.
+- With `--tts-provider gemini` and no narrator CLI installed, pass
+  `--skip-youtube` (or install a narrator) to avoid the skip notice.
+
+(Re)verify the lengths of any `youtube.txt` at a glance:
+
+```bash
+python3 - <<'PY'
+import re
+t = open("youtube.txt", encoding="utf-8").read()
+sec = lambda a,b: (re.search(rf"^{a}\n(.*?)(?:\n{b}\n|\Z)", t, re.S|re.M) or [None,""])[1].strip()
+title, desc = sec("TITLE","DESCRIPTION"), sec("DESCRIPTION","KEYWORDS")
+kw = sec("KEYWORDS","ZZZ")
+print(f"title       {len(title):>5}/100   {'OK' if len(title)<=100 else 'OVER'}")
+print(f"description {len(desc):>5}/5000  {'OK' if len(desc)<=5000 else 'OVER'}")
+print(f"keywords    {len(kw):>5}/500   {'OK' if len(kw)<=500 else 'OVER'}")
+PY
+```
 
 ---
 
