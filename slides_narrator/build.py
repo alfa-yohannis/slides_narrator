@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end lecture video builder.
+"""Slides Narrator — end-to-end lecture video builder.
 
 Pipeline:
   1. PDF -> per-page PNGs (pdftoppm)
@@ -16,7 +16,7 @@ Pipeline:
   6. Concatenated final MP4 + merged SRT
 
 Example:
-  python3 video_builder_claude/build.py \\
+  python3 slides_narrator/build.py \\
     --pdf slides/pertemuan_14/pertemuan_14.pdf \\
     --target videos/pertemuan_14 \\
     --final-name pertemuan_14 \\
@@ -24,8 +24,9 @@ Example:
     --tts-retries 10 \\
     --tts-retry-wait 30
 
-System requirements: ffmpeg, ffprobe, pdftoppm, pdfinfo (poppler-utils),
-and the `claude` CLI (Claude Code) for stage 2.
+System requirements: ffmpeg, ffprobe, pdftoppm, pdfinfo (poppler-utils);
+the `claude` CLI (default narrator) or `codex` CLI + pdftotext (--narrator codex)
+for stage 2; ffmpeg for Gemini TTS (--tts-provider gemini).
 Python deps (auto-installed into local .venv): edge-tts.
 """
 
@@ -53,7 +54,7 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
 VENV_DIR = APP_DIR / ".venv"
-VENV_MARK = "VIDEO_BUILDER_CLAUDE_VENV"
+VENV_MARK = "SLIDES_NARRATOR_VENV"
 
 
 def _bootstrap_venv() -> None:
