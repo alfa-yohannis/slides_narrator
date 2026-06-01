@@ -53,40 +53,129 @@ The narrator and the TTS engine are each swappable:
 
 ## Requirements
 
-**System tools** (must be on your `PATH`):
+Everything below is summarised here; the [Installation & setup](#installation--setup)
+section has copy‑paste commands.
 
-| Tool | Provides | Install (Debian/Ubuntu) |
-|------|----------|--------------------------|
-| `ffmpeg`, `ffprobe` | video/audio encoding & probing | `sudo apt install ffmpeg` |
-| `pdftoppm`, `pdfinfo` | PDF → PNG, page count (poppler) | `sudo apt install poppler-utils` |
-| `pdftotext` | slide text extraction — **only for `--narrator codex`** | `sudo apt install poppler-utils` |
-| `claude` | narration (default narrator) | [Claude Code](https://claude.com/claude-code) |
-| `codex` | narration — **only for `--narrator codex`** | `npm install -g @openai/codex` |
+### System tools (must be on your `PATH`)
 
-**Python:** 3.9+ (the script uses `from __future__ import annotations`, so older
-3.x may also work, but 3.9+ is recommended).
+| Tool | Provides | Needed for | Install (Debian/Ubuntu) |
+|------|----------|------------|--------------------------|
+| `ffmpeg`, `ffprobe` | video/audio encoding & probing | **always** | `sudo apt install ffmpeg` |
+| `pdftoppm`, `pdfinfo` | PDF → PNG, page count (poppler) | **always** | `sudo apt install poppler-utils` |
+| `pdftotext` | slide text extraction | `--narrator codex` | `sudo apt install poppler-utils` |
+| `claude` | narration | default narrator | [Claude Code](https://claude.com/claude-code) |
+| `codex` | narration | `--narrator codex` | `npm install -g @openai/codex` |
 
-**Python dependency:** `edge-tts>=7.0` — installed automatically into a local
-`.venv` on first run. You do **not** need to install it yourself.
+### Python
 
-> The `claude` CLI is only needed for **stage 2** (script generation). If you
-> pre‑write the narration scripts yourself, you can skip it entirely with
-> `--skip-scripts`.
+- **Python 3.9+** (the script uses `from __future__ import annotations`).
+- **Runtime dependency:** `edge-tts>=7.0` — listed in
+  [`slides_narrator/requirements.txt`](slides_narrator/requirements.txt) and
+  installed **automatically** into a local `.venv` on first run. You don't
+  install it yourself.
+- **Gemini TTS** (`--tts-provider gemini`) needs **no extra Python package** —
+  it calls the REST API over the standard library and pipes audio through
+  `ffmpeg`.
+- **Dev/test dependency:** `pytest` — listed in
+  [`slides_narrator/requirements-dev.txt`](slides_narrator/requirements-dev.txt),
+  installed only if you want to run the tests.
+
+### Credentials / accounts
+
+| For | What you need | How to set it |
+|-----|---------------|---------------|
+| Claude narrator (default) | A logged‑in Claude Code session (no API key) | `claude` then `/login`, or `ANTHROPIC_API_KEY` |
+| Codex narrator | A logged‑in Codex CLI | `codex login` |
+| Gemini TTS | A Gemini API key | `GEMINI_API_KEY` env var or a `.env` at the repo root |
+
+> Edge TTS (the default voice engine) needs **no key and no account**. The only
+> things required for a minimal run are `ffmpeg` + poppler + a logged‑in
+> `claude` (or pre‑written scripts with `--skip-scripts`).
 
 ---
 
-## Installation
+## Installation & setup
 
-No installation step is required beyond cloning the repo and having the system
-tools above. The first time you run `build.py`, it will:
-
-1. Create `slides_narrator/.venv`
-2. Install `edge-tts` into it
-3. Re‑launch itself inside that venv
+### 1. Clone and check system tools
 
 ```bash
-# From the repository root
+git clone <repo-url> slides_narrator
+cd slides_narrator
+
+# Debian/Ubuntu: the always-required tools
+sudo apt update && sudo apt install -y ffmpeg poppler-utils
+
+# verify
+ffmpeg -version | head -1
+pdftoppm -v 2>&1 | head -1
+```
+
+### 2. Python dependencies (automatic)
+
+There is **no manual install step** for the runtime. The first time you run
+`build.py` it self‑bootstraps:
+
+1. Creates `slides_narrator/.venv`
+2. Installs `edge-tts` (from `requirements.txt`) into it
+3. Re‑launches itself inside that venv
+
+```bash
+# From the repository root — triggers the one-time bootstrap, then prints help
 python3 slides_narrator/build.py --help
+```
+
+> If the `.venv` ever breaks (e.g. it was copied from another machine and the
+> shebangs point at a missing interpreter), just delete it — it is rebuilt on
+> the next run: `rm -rf slides_narrator/.venv`.
+
+### 3. Narrator CLI — pick one
+
+**Claude (default):** install [Claude Code](https://claude.com/claude-code) and
+log in once:
+
+```bash
+claude          # then run /login, or export ANTHROPIC_API_KEY=sk-ant-...
+echo "Reply OK" | claude -p     # verify it answers
+```
+
+**Codex (optional, for `--narrator codex`):**
+
+```bash
+npm install -g @openai/codex
+codex login                      # or configure per Codex docs
+codex --version
+```
+
+> Don't want either? Pre‑write `…/scripts/slide_NN.txt` yourself and run with
+> `--skip-scripts` — no narrator CLI is called.
+
+### 4. Gemini TTS key (optional, for `--tts-provider gemini`)
+
+Get a key from **[Google AI Studio](https://aistudio.google.com/apikey)** (one
+key, no billing project needed for the free tier), then make it available in any
+**one** of these ways:
+
+```bash
+# a) a .env at the repo root (auto-read; keep it gitignored)
+echo 'GEMINI_API_KEY=YOUR_KEY_HERE' >> .env
+
+# b) an environment variable
+export GEMINI_API_KEY=YOUR_KEY_HERE
+
+# c) pass it inline
+python3 slides_narrator/build.py ... --tts-provider gemini --gemini-api-key YOUR_KEY_HERE
+```
+
+Resolution order: `--gemini-api-key` → `$GEMINI_API_KEY` → `.env` at the repo
+root. The free tier is rate‑limited (≈10 requests/day on the preview TTS model);
+enable billing on the API project to lift it. See [pricing](https://ai.google.dev/gemini-api/docs/pricing).
+
+### 5. Dev/test dependencies (optional)
+
+Only needed to run the test suite (see [Testing](#testing)):
+
+```bash
+slides_narrator/.venv/bin/pip install -r slides_narrator/requirements-dev.txt
 ```
 
 ---
@@ -531,6 +620,60 @@ reports the model needs a newer CLI, upgrade with `npm install -g @openai/codex@
 - **A clip looks corrupt** — re‑run with `--only clips --force` to re‑encode.
 - **Wrong number of slides rendered** — delete the `slides/` folder and re‑run
   the `pdf` stage, or use `--force`.
+
+---
+
+## Testing
+
+The suite lives in [`tests/`](tests/) and is split into **unit** tests (pure
+functions — timestamps, SRT parsing/estimation, the codex prompt/schema, Gemini
+key resolution and HTTP‑response parsing with the network mocked) and
+**integration** tests (real `ffmpeg`/poppler stages driven on a hand‑built PDF;
+the Gemini path is exercised with synthesis monkey‑patched to silent PCM, so
+**no network or API key is used**).
+
+Install the test dependency once, then run from the repo root:
+
+```bash
+# one-time
+slides_narrator/.venv/bin/pip install -r slides_narrator/requirements-dev.txt
+
+# run everything
+slides_narrator/.venv/bin/python -m pytest
+
+# (or, if pytest is on your PATH and edge-tts is importable)
+pytest
+```
+
+Run a subset:
+
+```bash
+# only unit tests (fast, no external tools)
+pytest -m "not integration"
+
+# only integration tests (need ffmpeg + poppler; auto-skipped if missing)
+pytest -m integration
+
+# a single file
+pytest tests/test_unit.py
+
+# a single test by name
+pytest tests/test_unit.py::test_fmt_ts_basic
+
+# anything matching a keyword, verbose
+pytest -k gemini -v
+```
+
+Notes:
+
+- Integration tests **auto‑skip** when a required binary (`ffmpeg`, `ffprobe`,
+  `pdftoppm`, `pdfinfo`, `pdftotext`) is absent, so the unit tests always run
+  anywhere.
+- No test hits the live Edge or Gemini services or spends Gemini quota.
+- The tests import `build.py` directly (the venv bootstrap is skipped via the
+  `SLIDES_NARRATOR_VENV` marker and `edge_tts` is stubbed if absent), so they
+  run under any Python 3.9+ with `pytest` available — the app's `.venv` is the
+  simplest place to get that.
 
 ---
 
