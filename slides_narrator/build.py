@@ -107,6 +107,26 @@ def run(cmd, **kw):
     return subprocess.run(cmd, check=True, **kw)
 
 
+def cpu_budget() -> int:
+    """Worker ceiling: every core but one, so the machine stays usable."""
+    return max(1, (os.cpu_count() or 2) - 1)
+
+
+def resolve_concurrency(requested: int | None) -> int:
+    """Clamp --concurrency to cpu_budget(); None means 'use the whole budget'."""
+    budget = cpu_budget()
+    if requested is None:
+        log(f"[cpu] concurrency={budget} ({os.cpu_count()} cores, 1 spared)")
+        return budget
+    if requested < 1:
+        sys.exit("[fatal] --concurrency must be at least 1")
+    if requested > budget:
+        log(f"[cpu] --concurrency {requested} capped to {budget} "
+            f"({os.cpu_count()} cores, 1 spared)")
+        return budget
+    return requested
+
+
 def get_page_count(pdf: Path) -> int:
     out = subprocess.check_output(["pdfinfo", str(pdf)]).decode()
     for line in out.splitlines():
@@ -910,6 +930,7 @@ def stage_clips(
     crf: int,
     preset: str,
     audio_bitrate: str,
+    threads: int = 1,
 ) -> None:
     need_bin("ffmpeg")
     need_bin("ffprobe")
@@ -939,6 +960,7 @@ def stage_clips(
                 pass  # corrupt -> regenerate
         cmd = [
             "ffmpeg", "-y",
+            "-threads", str(threads),
             "-loop", "1", "-i", str(png),
             "-i", str(mp3),
             "-vf", vf,
@@ -959,7 +981,8 @@ def stage_clips(
 
     log(
         f"[4/6] Encoding {page_count} clips at {width_px}x{height_px} "
-        f"(crf={crf}, preset={preset}, audio={audio_bitrate}, concurrency={concurrency})"
+        f"(crf={crf}, preset={preset}, audio={audio_bitrate}, "
+        f"concurrency={concurrency}, threads/clip={threads})"
     )
     failures = []
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
@@ -1379,8 +1402,9 @@ def parse_args() -> argparse.Namespace:
                    help="libx264 preset; slower = better compression at same CRF (default slow).")
     p.add_argument("--audio-bitrate", default="256k",
                    help="AAC audio bitrate (default 256k).")
-    p.add_argument("--concurrency", type=int, default=6,
-                   help="Parallel TTS / ffmpeg workers (default 6).")
+    p.add_argument("--concurrency", type=int, default=None,
+                   help="Parallel TTS / ffmpeg workers. Defaults to all cores but one, "
+                        "and a larger value is capped at that same ceiling.")
     p.add_argument("--narrator", default="claude", choices=["claude", "codex"],
                    help="Narration script generator (default: claude). "
                         "codex feeds pdftotext-extracted slide text to `codex exec`.")
@@ -1437,6 +1461,7 @@ def _resolve_gemini_key(cli_value: str | None) -> str | None:
 
 def main() -> None:
     args = parse_args()
+    concurrency = resolve_concurrency(args.concurrency)
     pdf = args.pdf.resolve()
     target = args.target.resolve()
     if not pdf.exists():
@@ -1493,15 +1518,16 @@ def main() -> None:
             scripts_dir, audio_dir, subs_dir, page_count,
             args.tts_provider, args.voice, args.rate,
             args.gemini_tts_model, args.gemini_voice, gemini_key,
-            args.concurrency, args.force,
+            concurrency, args.force,
             args.skip_existing_audio, args.tts_retries, args.tts_retry_wait,
             args.tts_timeout,
         )
 
     if "clips" in stages:
         stage_clips(slides_dir, audio_dir, clips_dir, page_count,
-                    args.width, args.height, args.concurrency, args.force,
-                    args.crf, args.preset, args.audio_bitrate)
+                    args.width, args.height, concurrency, args.force,
+                    args.crf, args.preset, args.audio_bitrate,
+                    threads=max(1, cpu_budget() // concurrency))
 
     if "merge" in stages:
         stage_merge(clips_dir, subs_dir, work_dir, out_mp4, out_srt, page_count)

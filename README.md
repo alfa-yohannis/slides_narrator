@@ -552,7 +552,7 @@ across the clip by length):
 | `--crf` | `14` | libx264 CRF; lower = better quality. `0` = mathematically lossless, `~14` ≈ visually lossless. |
 | `--preset` | `slow` | libx264 preset (`ultrafast` … `veryslow`); slower = better compression. |
 | `--audio-bitrate` | `256k` | AAC audio bitrate. |
-| `--concurrency` | `6` | Parallel TTS / ffmpeg workers. |
+| `--concurrency` | cores − 1 | Parallel TTS / ffmpeg workers. One core is always left free, so a higher value is capped at cores − 1. Clip encoding also splits the budget into `-threads` per ffmpeg. |
 
 ### Flow control
 
