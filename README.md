@@ -590,8 +590,8 @@ these files afterward and re‑run with `--only audio,clips,merge` (or
 `--skip-scripts`) to regenerate the video from your edits.
 
 The run streams Claude's progress live (session start, assistant text, tool
-calls, results) and prints a heartbeat while waiting. There is a 30‑minute hard
-cap on the script‑generation step.
+calls, results) and prints a heartbeat while waiting. The step runs until
+Claude finishes; there is no time limit on it.
 
 ### Codex narrator (`--narrator codex`)
 

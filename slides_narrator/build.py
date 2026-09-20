@@ -285,7 +285,6 @@ def stage_generate_scripts(
         pass
 
     inner_text = ""
-    deadline = time.monotonic() + 1800  # 30 min hard cap
 
     try:
         for line in proc.stdout:
@@ -327,9 +326,6 @@ def stage_generate_scripts(
                 if subtype and subtype != "success":
                     log(f"[2/6] result subtype={subtype}")
                 inner_text = ev.get("result", "") or inner_text
-            if time.monotonic() > deadline:
-                proc.kill()
-                sys.exit("[fatal] claude CLI exceeded 30-minute deadline")
     finally:
         stop_heartbeat.set()
 
